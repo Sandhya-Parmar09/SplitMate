@@ -8,7 +8,17 @@ const FriendRequest = require('../models/FriendRequest');
 // controllers/tripController.js
 exports.createTrip = async (req, res) => {
   try {
-    const { title, memberUsernames } = req.body;
+    let { title, memberUsernames } = req.body;
+
+    // Validate title
+    title = String(title).trim();
+    if (!title || title.length === 0) {
+      return res.status(400).json({ message: "Trip title is required" });
+    }
+
+    if (!Array.isArray(memberUsernames) || memberUsernames.length === 0) {
+      return res.status(400).json({ message: "At least one member is required" });
+    }
 
     // 1. Fetch all members
     const members = await User.find({ username: { $in: memberUsernames } });
@@ -17,8 +27,8 @@ exports.createTrip = async (req, res) => {
       return res.status(400).json({ message: "Some usernames are invalid or not registered" });
     }
 
-// 2. Convert to IDs
-let memberIds = members.map(m => m._id.toString());
+    // 2. Convert to IDs
+    let memberIds = members.map(m => m._id.toString());
 
     // 2. Include trip creator
     if (!memberIds.includes(req.user.id)) {
@@ -39,7 +49,7 @@ let memberIds = members.map(m => m._id.toString());
     const trip = new Trip({ title, members: memberIds, createdBy: req.user.id, balanceMatrix });
     await trip.save();
 
-    res.status(201).json({ message: "Trip created successfully!", tripId: trip._id });
+    res.status(201).json({ message: "Trip created successfully!", tripId: trip._id, title: trip.title });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -122,27 +132,63 @@ exports.getExpenses = async (req, res) => {
 // Helper function to update balanceMatrix
 
   function updateBalanceMatrix(trip, expense) {
-  const members = trip.members;  // already array of ObjectIds in trip
+  const members = trip.members;
   const n = members.length;
 
-  // init balanceMatrix if empty or wrong size
   if (!trip.balanceMatrix || trip.balanceMatrix.length !== n) {
     trip.balanceMatrix = Array(n).fill().map(() => Array(n).fill(0));
   }
 
-  // Calculate per-share
-  const perShare = expense.amount / expense.splitBetween.length;
-
+  // Step 1: Track how much each member paid
+  const paid = Array(n).fill(0);
   expense.paidBy.forEach(payer => {
-    const payerIndex = members.findIndex(m => m.equals(payer.user));
-    expense.splitBetween.forEach(splitUser => {
-      const splitIndex = members.findIndex(m => m.equals(splitUser));
-      if (splitIndex !== payerIndex) {
-        trip.balanceMatrix[splitIndex][payerIndex] += perShare;
-        trip.balanceMatrix[payerIndex][splitIndex] -= perShare;
-      }
-    });
+    const idx = members.findIndex(m => m.equals(payer.user));
+    if (idx === -1) {
+      console.error(`Warning: Payer ${payer.user} not found in trip members`);
+      return; // Skip if not found
+    }
+    paid[idx] += payer.amount;
   });
+
+  // Step 2: Calculate how much each member should pay (equal split)
+  const perShare = expense.amount / expense.splitBetween.length;
+  const owes = Array(n).fill(0);
+  expense.splitBetween.forEach(splitUser => {
+    const idx = members.findIndex(m => m.equals(splitUser));
+    if (idx === -1) {
+      console.error(`Warning: Split user ${splitUser} not found in trip members`);
+      return; // Skip if not found
+    }
+    owes[idx] = perShare;
+  });
+
+  // Step 3: Calculate net balance: positive = owed money, negative = owes money
+  const netBalance = Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    netBalance[i] = paid[i] - owes[i];
+  }
+
+  // Step 4: Update matrix - debtors pay creditors proportionally
+  // Find creditors (positive balance) and debtors (negative balance)
+  const creditors = [];
+  const debtors = [];
+  for (let i = 0; i < n; i++) {
+    if (netBalance[i] > 0) creditors.push({ idx: i, amount: netBalance[i] });
+    if (netBalance[i] < 0) debtors.push({ idx: i, amount: -netBalance[i] });
+  }
+
+  // Debtors pay creditors proportionally to their credit amount
+  const totalCredit = creditors.reduce((sum, c) => sum + c.amount, 0);
+  if (totalCredit > 0) {
+    debtors.forEach(debtor => {
+      creditors.forEach(creditor => {
+        const proportion = creditor.amount / totalCredit;
+        const amountOwed = debtor.amount * proportion;
+        trip.balanceMatrix[debtor.idx][creditor.idx] += amountOwed;
+        trip.balanceMatrix[creditor.idx][debtor.idx] -= amountOwed;
+      });
+    });
+  }
 
   return trip.balanceMatrix;
 }
@@ -152,10 +198,16 @@ exports.getExpenses = async (req, res) => {
 exports.addExpense = async (req, res) => {
   try {
     const { tripId } = req.params;
-    const { description, amount, paidBy, splitBetween, category } = req.body;
+    let { description, amount, paidBy, splitBetween, category } = req.body;
 
     const trip = await Trip.findById(tripId);
     if (!trip) return res.status(404).json({ message: "Trip not found" });
+
+    // Convert amount to number
+    amount = Number(amount);
+    if (isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ message: "Amount must be a positive number" });
+    }
 
     // Validate trip members
     const tripMembers = trip.members.map(m => m.toString());
@@ -170,9 +222,23 @@ exports.addExpense = async (req, res) => {
       }
     }
 
+    // Convert paidBy amounts to numbers
+    paidBy = paidBy.map(p => ({
+      user: p.user,
+      amount: Number(p.amount)
+    })).filter(p => p.amount > 0);
+
+    if (paidBy.length === 0) {
+      return res.status(400).json({ message: "At least one person must pay" });
+    }
+
+    if (splitBetween.length === 0) {
+      return res.status(400).json({ message: "Expense must be split among at least one person" });
+    }
+
     // Validate sum of paidBy
     const totalPaid = paidBy.reduce((sum, p) => sum + p.amount, 0);
-    if (totalPaid !== amount) {
+    if (Math.abs(totalPaid - amount) > 0.01) { // Allow 0.01 for float precision
       return res.status(400).json({ 
         message: `Total paid (${totalPaid}) must equal expense amount (${amount})` 
       });
@@ -248,7 +314,7 @@ exports.getExpenseById = async (req, res) => {
 exports.editExpense = async (req, res) => {
   try {
     const { tripId, expenseId } = req.params;
-    const { description, amount, paidBy, splitBetween, category } = req.body;
+    let { description, amount, paidBy, splitBetween, category } = req.body;
 
     const trip = await Trip.findById(tripId);
     if (!trip) return res.status(404).json({ message: "Trip not found" });
@@ -262,15 +328,45 @@ exports.editExpense = async (req, res) => {
     const expenseIndex = trip.expenses.findIndex(e => e._id.equals(expenseId));
     if (expenseIndex === -1) return res.status(404).json({ message: "Expense not found" });
 
+    // Convert amount to number
+    amount = Number(amount);
+    if (isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ message: "Amount must be a positive number" });
+    }
+
+    // Validate trip members
+    const tripMembers = trip.members.map(m => m.toString());
+    const allUserIds = [...paidBy.map(p => p.user), ...splitBetween];
+    for (let uid of allUserIds) {
+      if (!tripMembers.includes(uid)) {
+        return res.status(400).json({ message: `User ${uid} is not part of the trip` });
+      }
+    }
+
+    // Convert paidBy amounts to numbers
+    paidBy = paidBy.map(p => ({
+      user: p.user,
+      amount: Number(p.amount)
+    })).filter(p => p.amount > 0);
+
+    if (paidBy.length === 0) {
+      return res.status(400).json({ message: "At least one person must pay" });
+    }
+
+    if (splitBetween.length === 0) {
+      return res.status(400).json({ message: "Expense must be split among at least one person" });
+    }
+
     // Validate paidBy sum
     const totalPaid = paidBy.reduce((sum, p) => sum + p.amount, 0);
-    if (totalPaid !== amount) {
+    if (Math.abs(totalPaid - amount) > 0.01) {
       return res.status(400).json({ message: "Total paid must equal expense amount" });
     }
 
-    // Edit expense
-    trip.expenses[expenseIndex] = { description, amount, paidBy, splitBetween, category, _id: expenseId };
-    // Recalculate balanceMatrix
+    // Edit expense using Object.assign to preserve subdocument
+    Object.assign(trip.expenses[expenseIndex], { description, amount, paidBy, splitBetween, category });
+
+    // Recalculate balanceMatrix from scratch
     trip.balanceMatrix = Array(trip.members.length).fill().map(() => Array(trip.members.length).fill(0));
     trip.expenses.forEach(exp => updateBalanceMatrix(trip, exp));
     await trip.save();
