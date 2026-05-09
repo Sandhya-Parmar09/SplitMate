@@ -9,7 +9,7 @@ const tripRoutes = require('./routes/tripRoutes');
 
 const app = express();
 app.use(cors({
-    origin: ['https://split-mate-xkqu.vercel.app'],
+    origin: ['https://split-mate-xkqu.vercel.app','https://split-mate-zeta.vercel.app'],
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
      credentials: true,
   }));
