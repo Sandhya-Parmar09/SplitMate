@@ -4,9 +4,22 @@ const User = require('../models/User');
 const FriendRequest = require('../models/FriendRequest');
 
 exports.sendRequest = async (req, res) => {
-  const { username } = req.body; // receiver's username
+  let { username } = req.body; // receiver's username
   
   try {
+    // Validate input
+    if (!username || typeof username !== 'string') {
+      return res.status(400).json({ message: 'Username is required' });
+    }
+
+    username = username.trim().toLowerCase();
+    
+    // Check if trying to add self
+    const currentUser = await User.findById(req.user.id);
+    if (currentUser && currentUser.username.toLowerCase() === username) {
+      return res.status(400).json({ message: 'You cannot send a friend request to yourself!' });
+    }
+
     // 1️⃣ Find receiver by username
     const receiver = await User.findOne({ username });
     if (!receiver) {
@@ -80,16 +93,25 @@ exports.getOutgoingRequests = async (req, res) => {
 exports.respondRequest = async (req, res) => {
   const { requestId, action } = req.body; // action: 'accepted' or 'declined'
   try {
+    // Validate inputs
+    if (!requestId || typeof requestId !== 'string') {
+      return res.status(400).json({ message: 'Request ID is required' });
+    }
+
+    if (!action || typeof action !== 'string') {
+      return res.status(400).json({ message: 'Action is required' });
+    }
+
+    if (!['accepted', 'declined'].includes(action)) {
+      return res.status(400).json({ message: "Action must be 'accepted' or 'declined'" });
+    }
+
     const request = await FriendRequest.findById(requestId);
     if (!request) return res.status(404).json({ message: 'Request not found' });
 
     // Ensure receiver is the one responding
     if (request.receiver.toString() !== req.user.id) {
       return res.status(403).json({ message: 'Not authorized to respond' });
-    }
-
-    if (!['accepted', 'declined'].includes(action)) {
-      return res.status(400).json({ message: "Action must be 'accepted' or 'declined'" });
     }
 
     // Update status
