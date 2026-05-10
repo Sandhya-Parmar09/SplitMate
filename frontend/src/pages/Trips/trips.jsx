@@ -58,7 +58,7 @@ const Trips = () => {
                   <span className="trip-label">Members:</span>
                   <span className="trip-members">{trip.members.map(m => m.name).join(', ')}</span>
                 </div>
-                <div className="trip-created-by">Created by: {trip.members[0]?.name || 'Unknown'}</div>
+              <div className="trip-created-by">Created by: {trip.createdBy?.name || 'Unknown'}</div>
               </div>
             ))}
         </div>
